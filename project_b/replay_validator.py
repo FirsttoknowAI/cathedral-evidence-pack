@@ -17,7 +17,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List
 
-from chronicle import Chronicle
+from project_b.chronicle import Chronicle
 
 
 class ReplayValidator:
@@ -86,15 +86,9 @@ class ReplayValidator:
             }
         
         # Check hash chain integrity (Chronicle.verify_chain())
+        # Do NOT early-return if this fails. Continue diagnostics to collect all errors.
         if not self.chronicle.verify_chain():
             errors.append("Hash chain verification failed")
-            return {
-                "valid": False,
-                "event_count": event_count,
-                "first_seq": None,
-                "last_seq": None,
-                "errors": errors
-            }
         
         # Extract sequence numbers
         first_seq = events[0]["seq"]
