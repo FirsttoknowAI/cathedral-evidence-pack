@@ -65,7 +65,7 @@ class Chronicle:
         - Prevents replay attacks via JSON reordering
         - Enables bit-for-bit verification
         """
-        return json.dumps(obj, sort_keys=True, separators=(',', ':'))
+        return json.dumps(obj, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
     
     def _compute_hash(self, data: str) -> str:
         """
@@ -79,7 +79,7 @@ class Chronicle:
         """
         return hashlib.sha256(data.encode()).hexdigest()
     
-    def _get_next_seq_and_prev_hash(self) -> tuple[int, str]:
+    def _get_next_seq_and_prev_hash(self) -> tuple:
         """
         Get the next sequence number and hash of the last event in the ledger.
         
@@ -142,6 +142,7 @@ class Chronicle:
         }
         
         # Compute hash (hash of everything except the hash field itself)
+        # CRITICAL: seq MUST be included in the hashable content
         hashable = {
             "event_id": event["event_id"],
             "seq": event["seq"],
@@ -169,7 +170,7 @@ class Chronicle:
             List of events in order, or empty list if ledger is empty
             
         Raises:
-            ValueError: If any line contains corrupted JSON
+            ValueError: If any line contains corrupted JSON, includes line number
         """
         events = []
         
@@ -197,19 +198,14 @@ class Chronicle:
         Verify hash chain integrity.
         
         Checks:
-        1. Each event's hash is correct
-        2. Each event's prev_hash matches previous event's hash
+        1. Each event's hash is correct (recomputed from hashable content)
+        2. Each event's prev_hash matches previous event's hash (strict chain)
         3. First event's prev_hash is "0"
-        4. Sequence numbers are monotonic
+        4. First event's seq is 0
+        5. Sequence numbers are strictly monotonic (no gaps, no reordering)
         
         Returns:
-            True if chain is valid, False otherwise
-            
-        Why verify?
-        - Detects tampering (event modified on disk)
-        - Detects missing events (hash chain broken)
-        - Detects reordered events (prev_hash doesn't match)
-        - Detects sequence number gaps (indicates deletion)
+            True if chain is valid, False otherwise (detects tampering, missing events, reordering)
         """
         events = self.load_events()
         
@@ -228,15 +224,16 @@ class Chronicle:
         prev_seq = -1
         
         for event in events:
-            # Verify seq is monotonic
+            # Verify seq is strictly monotonic (no gaps, catches reordering and deletion)
             if event["seq"] != prev_seq + 1:
                 return False
             
-            # Verify prev_hash matches
+            # Verify prev_hash matches (strict chain check, catches any tampering/insertion)
             if event["prev_hash"] != prev_hash:
                 return False
             
-            # Recompute hash
+            # Recompute hash from hashable content
+            # CRITICAL: seq MUST be included here, same as in append_event
             hashable = {
                 "event_id": event["event_id"],
                 "seq": event["seq"],
@@ -248,7 +245,7 @@ class Chronicle:
             hashable_str = self._serialize_deterministically(hashable)
             computed_hash = self._compute_hash(hashable_str)
             
-            # Verify hash matches
+            # Verify hash matches (catches event tampering)
             if event["hash"] != computed_hash:
                 return False
             
@@ -278,12 +275,13 @@ if __name__ == "__main__":
         # Create chronicle
         chronicle = Chronicle(ledger_path)
         
-        # Append some events
+        # Test 1: Append events
+        print("Test 1: Appending events...")
         e1 = chronicle.append_event("inference", {
             "prompt": "What is 2+2?",
             "response": "4"
         })
-        print(f"Event 1: seq={e1['seq']}, event_id={e1['event_id'][:8]}...")
+        print(f"  Event 1: seq={e1['seq']}, event_id={e1['event_id'][:8]}...")
         assert e1["seq"] == 0, "First event should have seq=0"
         assert e1["prev_hash"] == "0", "First event should have prev_hash='0'"
         
@@ -292,22 +290,44 @@ if __name__ == "__main__":
             "actionable_progression": True,
             "confidence": 3
         })
-        print(f"Event 2: seq={e2['seq']}, event_id={e2['event_id'][:8]}...")
+        print(f"  Event 2: seq={e2['seq']}, event_id={e2['event_id'][:8]}...")
         assert e2["seq"] == 1, "Second event should have seq=1"
         assert e2["prev_hash"] == e1["hash"], "Event 2 should chain to Event 1"
         
-        # Load and verify
+        # Test 2: Load and verify
+        print("Test 2: Loading and verifying chain...")
         events = chronicle.load_events()
-        print(f"Total events: {len(events)}")
+        print(f"  Total events: {len(events)}")
         assert len(events) == 2, "Should have 2 events"
         
         valid = chronicle.verify_chain()
-        print(f"Chain valid: {valid}")
+        print(f"  Chain valid: {valid}")
         assert valid, "Chain verification failed"
         
+        # Test 3: Seq starts at 0
+        print("Test 3: Verifying seq starts at 0...")
         assert chronicle.get_event_count() == 2, "Event count mismatch"
+        assert events[0]["seq"] == 0, "First event seq should be 0"
+        assert events[1]["seq"] == 1, "Second event seq should be 1"
         
+        # Test 4: Seq is in hash
+        print("Test 4: Verifying seq is included in hash...")
+        hashable = {
+            "event_id": e1["event_id"],
+            "seq": e1["seq"],
+            "timestamp": e1["timestamp"],
+            "event_type": e1["event_type"],
+            "payload": e1["payload"],
+            "prev_hash": e1["prev_hash"],
+        }
+        hashable_str = json.dumps(hashable, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+        expected_hash = hashlib.sha256(hashable_str.encode()).hexdigest()
+        assert e1["hash"] == expected_hash, "Event 1 hash should include seq"
+        
+        # Test 5: Last event
+        print("Test 5: Getting last event...")
         last = chronicle.get_last_event()
         assert last["seq"] == 1, "Last event seq mismatch"
+        assert last["hash"] == e2["hash"], "Last event hash mismatch"
         
         print("✓ All tests passed")
